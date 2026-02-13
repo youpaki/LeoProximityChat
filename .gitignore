@@ -1,0 +1,29 @@
+# Build directories
+build/
+out/
+dist/
+bin/
+obj/
+
+# IDE
+.vs/
+.vscode/
+*.sln
+*.vcxproj*
+*.user
+
+# Dependencies
+node_modules/
+vcpkg_installed/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
