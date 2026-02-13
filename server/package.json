@@ -1,0 +1,17 @@
+{
+  "name": "leo-proximity-chat-server",
+  "version": "1.0.0",
+  "description": "Relay server for Leo's Rocket Proximity Chat BakkesMod plugin",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

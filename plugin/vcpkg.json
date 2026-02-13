@@ -1,0 +1,14 @@
+{
+  "name": "leo-proximity-chat",
+  "version": "1.0.0",
+  "description": "BakkesMod proximity voice chat plugin for Rocket League",
+  "dependencies": [
+    "portaudio",
+    "opus",
+    "ixwebsocket",
+    "nlohmann-json"
+  ],
+  "overrides": [
+    { "name": "openssl", "version": "3.3.0" }
+  ]
+}
