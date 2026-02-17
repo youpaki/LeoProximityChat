@@ -88,26 +88,33 @@ wss.on("connection", (ws, req) => {
                 }
 
                 // Remove existing connection with same steamId (reconnect)
-                if (room.has(steamId)) {
+                // Only replace if steamId is a real ID (not generated/random)
+                if (room.has(steamId) && steamId !== "0" && !steamId.startsWith("leo_")) {
                     const old = room.get(steamId);
                     try { old.ws.close(1000, "replaced"); } catch (_) {}
                     room.delete(steamId);
                 }
 
-                client = { ws, steamId, playerName: playerName || "Unknown", matchId, alive: true };
-                room.set(steamId, client);
+                // If steamId is "0" or already taken, generate a unique connection key
+                let roomKey = steamId;
+                if (steamId === "0" || steamId.startsWith("leo_") || room.has(steamId)) {
+                    roomKey = steamId + "_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+                }
+
+                client = { ws, steamId, roomKey, playerName: playerName || "Unknown", matchId, alive: true };
+                room.set(roomKey, client);
 
                 // Notify joiner of existing peers
                 const peers = [];
-                for (const [sid, peer] of room) {
-                    if (sid !== steamId) {
-                        peers.push({ steamId: sid, playerName: peer.playerName });
+                for (const [key, peer] of room) {
+                    if (key !== roomKey) {
+                        peers.push({ steamId: peer.steamId, playerName: peer.playerName });
                     }
                 }
                 sendJson(ws, { type: "welcome", yourSteamId: steamId, peers });
 
                 // Notify existing peers of new joiner
-                broadcastToRoom(matchId, steamId, {
+                broadcastToRoom(matchId, roomKey, {
                     type: "peer_joined",
                     steamId,
                     playerName: client.playerName
@@ -121,7 +128,7 @@ wss.on("connection", (ws, req) => {
                 // Optional: clients can send position updates as text too
                 // (primary position data is embedded in audio packets)
                 if (!existingClient) return;
-                broadcastToRoom(existingClient.matchId, existingClient.steamId, {
+                broadcastToRoom(existingClient.matchId, existingClient.roomKey, {
                     type: "peer_position",
                     steamId: existingClient.steamId,
                     x: msg.x || 0,
@@ -163,8 +170,19 @@ wss.on("connection", (ws, req) => {
         // Build relayed packet: prepend sender's steamId (8 bytes LE)
         const steamIdBuf = Buffer.alloc(8);
         // Store steamId as two 32-bit ints (JS doesn't handle 64-bit ints natively well)
-        const steamIdBig = BigInt(existingClient.steamId);
-        steamIdBuf.writeBigUInt64LE(steamIdBig);
+        // Use a hash of the steamId string if it's not a pure number
+        let steamIdNum;
+        try {
+            steamIdNum = BigInt(existingClient.steamId);
+        } catch (e) {
+            // Non-numeric steamId (e.g. "leo_123456_789") — hash it to a number
+            let hash = BigInt(0);
+            for (let i = 0; i < existingClient.steamId.length; i++) {
+                hash = (hash * BigInt(31) + BigInt(existingClient.steamId.charCodeAt(i))) & BigInt("0xFFFFFFFFFFFFFFFF");
+            }
+            steamIdNum = hash;
+        }
+        steamIdBuf.writeBigUInt64LE(steamIdNum);
 
         // Final format: [0x03][steamId 8B][pos_x 4B][pos_y 4B][pos_z 4B][opus_data...]
         const relayed = Buffer.concat([
@@ -174,8 +192,8 @@ wss.on("connection", (ws, req) => {
         ]);
 
         // Relay to all other peers in the room
-        for (const [sid, peer] of room) {
-            if (sid !== existingClient.steamId && peer.ws.readyState === WebSocket.OPEN) {
+        for (const [key, peer] of room) {
+            if (key !== existingClient.roomKey && peer.ws.readyState === WebSocket.OPEN) {
                 try {
                     peer.ws.send(relayed, { binary: true });
                 } catch (_) {}
@@ -191,12 +209,12 @@ function sendJson(ws, obj) {
     }
 }
 
-function broadcastToRoom(matchId, excludeSteamId, obj) {
+function broadcastToRoom(matchId, excludeRoomKey, obj) {
     const room = rooms.get(matchId);
     if (!room) return;
     const msg = JSON.stringify(obj);
-    for (const [sid, peer] of room) {
-        if (sid !== excludeSteamId && peer.ws.readyState === WebSocket.OPEN) {
+    for (const [key, peer] of room) {
+        if (key !== excludeRoomKey && peer.ws.readyState === WebSocket.OPEN) {
             try { peer.ws.send(msg); } catch (_) {}
         }
     }
@@ -206,7 +224,7 @@ function removeClient(client) {
     const room = rooms.get(client.matchId);
     if (!room) return;
 
-    room.delete(client.steamId);
+    room.delete(client.roomKey);
 
     // Notify remaining peers
     broadcastToRoom(client.matchId, "", {

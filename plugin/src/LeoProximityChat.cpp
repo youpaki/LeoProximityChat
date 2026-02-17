@@ -2,10 +2,20 @@
 #include "LeoProximityChat.h"
 #include "version.h"
 
-// ImGui (provided by BakkesMod)
-#include "imgui/imgui.h"
+#include <algorithm>
+#include <vector>
 
-BAKKESMOD_PLUGIN(LeoProximityChat, "Leo's Rocket Proximity Chat", PLUGIN_VERSION, PLUGINTYPE_FREEPLAY)
+// ImGui (provided by BakkesMod)
+#include "imgui.h"
+
+// BakkesMod wrappers needed for game state access
+#include "bakkesmod/wrappers/includes.h"
+#include "bakkesmod/wrappers/ArrayWrapper.h"
+#include "bakkesmod/wrappers/GameEvent/ServerWrapper.h"
+#include "bakkesmod/wrappers/GameObject/PriWrapper.h"
+
+// Allow plugin in ALL game modes (online, freeplay, private, etc.)
+BAKKESMOD_PLUGIN(LeoProximityChat, "Leo's Rocket Proximity Chat", PLUGIN_VERSION, PERMISSION_ALL)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Plugin Lifecycle
@@ -17,14 +27,14 @@ void LeoProximityChat::onLoad() {
     registerCVars();
     initSubsystems();
 
-    // ── Hook game events ─────────────────────────────────────────────────
-    // Tick hook — fires every game tick for position updates
+    // ── Tick hook — fires every game tick for position updates ────────────
     gameWrapper->HookEvent(
         "Function TAGame.Car_TA.SetVehicleInput",
         std::bind(&LeoProximityChat::onTick, this, std::placeholders::_1)
     );
 
-    // Match lifecycle hooks
+    // ── Match lifecycle hooks — cover ALL game modes ─────────────────────
+    // Soccar (casual, competitive, extra modes)
     gameWrapper->HookEvent(
         "Function TAGame.GameEvent_Soccar_TA.InitGame",
         std::bind(&LeoProximityChat::onMatchJoined, this, std::placeholders::_1)
@@ -38,10 +48,26 @@ void LeoProximityChat::onLoad() {
         std::bind(&LeoProximityChat::onMatchLeft, this, std::placeholders::_1)
     );
 
-    // Also hook online game events as fallback
+    // Generic game event hooks (covers private matches, LAN, etc.)
     gameWrapper->HookEvent(
-        "Function Engine.GameInfo.PostLogin",
+        "Function GameEvent_TA.Countdown.BeginState",
         std::bind(&LeoProximityChat::onMatchJoined, this, std::placeholders::_1)
+    );
+
+    // Freeplay detection
+    gameWrapper->HookEvent(
+        "Function TAGame.GameEvent_TrainingEditor_TA.StartPlayTest",
+        std::bind(&LeoProximityChat::onMatchJoined, this, std::placeholders::_1)
+    );
+    gameWrapper->HookEvent(
+        "Function TAGame.Mutator_Freeplay_TA.Init",
+        std::bind(&LeoProximityChat::onMatchJoined, this, std::placeholders::_1)
+    );
+
+    // Leaving to main menu
+    gameWrapper->HookEvent(
+        "Function TAGame.GFxData_MainMenu_TA.MainMenuAdded",
+        std::bind(&LeoProximityChat::onMatchLeft, this, std::placeholders::_1)
     );
 
     // ── Notifier commands ────────────────────────────────────────────────
@@ -53,8 +79,10 @@ void LeoProximityChat::onLoad() {
 
     cvarManager->registerNotifier("leo_proxchat_refresh_devices", [this](std::vector<std::string>) {
         if (audioEngine_) {
+            std::lock_guard<std::mutex> lock(deviceMutex_);
             cachedInputDevices_ = audioEngine_->getInputDevices();
             cachedOutputDevices_ = audioEngine_->getOutputDevices();
+            lastDeviceRefresh_ = std::chrono::steady_clock::now();
             log("Audio devices refreshed");
         }
     }, "Refresh audio device list", PERMISSION_ALL);
@@ -77,12 +105,14 @@ void LeoProximityChat::onUnload() {
 
     shutdownSubsystems();
 
-    // Unhook events
     gameWrapper->UnhookEvent("Function TAGame.Car_TA.SetVehicleInput");
     gameWrapper->UnhookEvent("Function TAGame.GameEvent_Soccar_TA.InitGame");
     gameWrapper->UnhookEvent("Function TAGame.GameEvent_Soccar_TA.EventMatchEnded");
     gameWrapper->UnhookEvent("Function TAGame.GameEvent_Soccar_TA.Destroyed");
-    gameWrapper->UnhookEvent("Function Engine.GameInfo.PostLogin");
+    gameWrapper->UnhookEvent("Function GameEvent_TA.Countdown.BeginState");
+    gameWrapper->UnhookEvent("Function TAGame.GameEvent_TrainingEditor_TA.StartPlayTest");
+    gameWrapper->UnhookEvent("Function TAGame.Mutator_Freeplay_TA.Init");
+    gameWrapper->UnhookEvent("Function TAGame.GFxData_MainMenu_TA.MainMenuAdded");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -90,7 +120,6 @@ void LeoProximityChat::onUnload() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 void LeoProximityChat::registerCVars() {
-    // Enable/disable
     cvarManager->registerCvar("leo_proxchat_enabled", "1", "Enable proximity chat", true, true, 0, true, 1)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             enabled_ = cvar.getBoolValue();
@@ -100,11 +129,9 @@ void LeoProximityChat::registerCVars() {
             }
         });
 
-    // Server URL
     cvarManager->registerCvar("leo_proxchat_server_url",
         Protocol::DEFAULT_SERVER_URL, "Relay server URL");
 
-    // Audio volumes
     cvarManager->registerCvar("leo_proxchat_master_volume", "100", "Master volume", true, true, 0, true, 200)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             if (audioEngine_) audioEngine_->setOutputVolume(cvar.getFloatValue() / 100.0f);
@@ -115,7 +142,6 @@ void LeoProximityChat::registerCVars() {
             if (audioEngine_) audioEngine_->setMicVolume(cvar.getFloatValue() / 100.0f);
         });
 
-    // Voice settings
     cvarManager->registerCvar("leo_proxchat_push_to_talk", "0", "Enable push-to-talk mode", true, true, 0, true, 1)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             if (audioEngine_) audioEngine_->setPushToTalk(cvar.getBoolValue());
@@ -133,13 +159,12 @@ void LeoProximityChat::registerCVars() {
             if (audioEngine_) audioEngine_->setHoldTimeMs(cvar.getFloatValue());
         });
 
-    // Proximity settings
     cvarManager->registerCvar("leo_proxchat_max_distance", "8000", "Maximum hearing distance", true, true, 500, true, 15000)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             if (audioEngine_) {
                 auto& sa = audioEngine_->getSpatialAudio();
-                float inner = cvarManager->getCvar("leo_proxchat_full_vol_distance").getFloatValue();
-                sa.setDistanceParams(inner, cvar.getFloatValue());
+                auto innerCvar = cvarManager->getCvar("leo_proxchat_full_vol_distance");
+                if (innerCvar) sa.setDistanceParams(innerCvar.getFloatValue(), cvar.getFloatValue());
             }
         });
 
@@ -147,8 +172,8 @@ void LeoProximityChat::registerCVars() {
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             if (audioEngine_) {
                 auto& sa = audioEngine_->getSpatialAudio();
-                float outer = cvarManager->getCvar("leo_proxchat_max_distance").getFloatValue();
-                sa.setDistanceParams(cvar.getFloatValue(), outer);
+                auto outerCvar = cvarManager->getCvar("leo_proxchat_max_distance");
+                if (outerCvar) sa.setDistanceParams(cvar.getFloatValue(), outerCvar.getFloatValue());
             }
         });
 
@@ -159,20 +184,18 @@ void LeoProximityChat::registerCVars() {
 
     cvarManager->registerCvar("leo_proxchat_rolloff", "10", "Distance rolloff factor (1-20)", true, true, 1, true, 20)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
-            // rolloff stored as int 1-20, used as float 0.1-2.0
             if (audioEngine_) {
                 auto& sa = audioEngine_->getSpatialAudio();
-                float inner = cvarManager->getCvar("leo_proxchat_full_vol_distance").getFloatValue();
-                float outer = cvarManager->getCvar("leo_proxchat_max_distance").getFloatValue();
-                sa.setDistanceParams(inner, outer, cvar.getFloatValue() / 10.0f);
+                auto innerCvar = cvarManager->getCvar("leo_proxchat_full_vol_distance");
+                auto outerCvar = cvarManager->getCvar("leo_proxchat_max_distance");
+                if (innerCvar && outerCvar)
+                    sa.setDistanceParams(innerCvar.getFloatValue(), outerCvar.getFloatValue(), cvar.getFloatValue() / 10.0f);
             }
         });
 
-    // Device selection (-1 = default)
     cvarManager->registerCvar("leo_proxchat_input_device", "-1", "Input audio device ID");
     cvarManager->registerCvar("leo_proxchat_output_device", "-1", "Output audio device ID");
 
-    // Mic mute
     cvarManager->registerCvar("leo_proxchat_mic_muted", "0", "Mute microphone", true, true, 0, true, 1)
         .addOnValueChanged([this](std::string, CVarWrapper cvar) {
             if (audioEngine_) audioEngine_->setMicMuted(cvar.getBoolValue());
@@ -182,32 +205,47 @@ void LeoProximityChat::registerCVars() {
 void LeoProximityChat::applyCVarSettings() {
     if (!audioEngine_) return;
 
-    auto getCvar = [this](const char* name) { return cvarManager->getCvar(name); };
+    auto getCvar = [this](const char* name) -> CVarWrapper { return cvarManager->getCvar(name); };
 
-    enabled_ = getCvar("leo_proxchat_enabled").getBoolValue();
+    auto enabledCvar = getCvar("leo_proxchat_enabled");
+    if (enabledCvar) enabled_ = enabledCvar.getBoolValue();
 
-    audioEngine_->setOutputVolume(getCvar("leo_proxchat_master_volume").getFloatValue() / 100.0f);
-    audioEngine_->setMicVolume(getCvar("leo_proxchat_mic_volume").getFloatValue() / 100.0f);
-    audioEngine_->setPushToTalk(getCvar("leo_proxchat_push_to_talk").getBoolValue());
-    audioEngine_->setVoiceThreshold(getCvar("leo_proxchat_voice_threshold").getFloatValue() / 100.0f);
-    audioEngine_->setHoldTimeMs(getCvar("leo_proxchat_hold_time").getFloatValue());
-    audioEngine_->setMicMuted(getCvar("leo_proxchat_mic_muted").getBoolValue());
+    auto masterCvar = getCvar("leo_proxchat_master_volume");
+    if (masterCvar) audioEngine_->setOutputVolume(masterCvar.getFloatValue() / 100.0f);
+
+    auto micCvar = getCvar("leo_proxchat_mic_volume");
+    if (micCvar) audioEngine_->setMicVolume(micCvar.getFloatValue() / 100.0f);
+
+    auto pttCvar = getCvar("leo_proxchat_push_to_talk");
+    if (pttCvar) audioEngine_->setPushToTalk(pttCvar.getBoolValue());
+
+    auto threshCvar = getCvar("leo_proxchat_voice_threshold");
+    if (threshCvar) audioEngine_->setVoiceThreshold(threshCvar.getFloatValue() / 100.0f);
+
+    auto holdCvar = getCvar("leo_proxchat_hold_time");
+    if (holdCvar) audioEngine_->setHoldTimeMs(holdCvar.getFloatValue());
+
+    auto mutedCvar = getCvar("leo_proxchat_mic_muted");
+    if (mutedCvar) audioEngine_->setMicMuted(mutedCvar.getBoolValue());
 
     auto& sa = audioEngine_->getSpatialAudio();
-    sa.setEnabled(getCvar("leo_proxchat_3d_audio").getBoolValue());
-    sa.setDistanceParams(
-        getCvar("leo_proxchat_full_vol_distance").getFloatValue(),
-        getCvar("leo_proxchat_max_distance").getFloatValue(),
-        getCvar("leo_proxchat_rolloff").getFloatValue() / 10.0f
-    );
+    auto spatialCvar = getCvar("leo_proxchat_3d_audio");
+    if (spatialCvar) sa.setEnabled(spatialCvar.getBoolValue());
 
-    pttKeyName_ = getCvar("leo_proxchat_ptt_key").getStringValue();
+    auto innerCvar = getCvar("leo_proxchat_full_vol_distance");
+    auto outerCvar = getCvar("leo_proxchat_max_distance");
+    auto rollCvar  = getCvar("leo_proxchat_rolloff");
+    if (innerCvar && outerCvar && rollCvar)
+        sa.setDistanceParams(innerCvar.getFloatValue(), outerCvar.getFloatValue(), rollCvar.getFloatValue() / 10.0f);
 
-    // Device selection
-    int inputDev = getCvar("leo_proxchat_input_device").getIntValue();
-    int outputDev = getCvar("leo_proxchat_output_device").getIntValue();
-    if (inputDev >= 0) audioEngine_->setInputDevice(inputDev);
-    if (outputDev >= 0) audioEngine_->setOutputDevice(outputDev);
+    auto pttKeyCvar = getCvar("leo_proxchat_ptt_key");
+    if (pttKeyCvar) pttKeyName_ = pttKeyCvar.getStringValue();
+
+    auto inputCvar = getCvar("leo_proxchat_input_device");
+    if (inputCvar && inputCvar.getIntValue() >= 0) audioEngine_->setInputDevice(inputCvar.getIntValue());
+
+    auto outputCvar = getCvar("leo_proxchat_output_device");
+    if (outputCvar && outputCvar.getIntValue() >= 0) audioEngine_->setOutputDevice(outputCvar.getIntValue());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -217,19 +255,16 @@ void LeoProximityChat::applyCVarSettings() {
 void LeoProximityChat::initSubsystems() {
     if (subsystemsInitialized_) return;
 
-    // ── Audio Engine ─────────────────────────────────────────────────────
     audioEngine_ = std::make_unique<AudioEngine>();
     if (!audioEngine_->initialize()) {
         logError("Audio engine failed to initialize: " + audioEngine_->getLastError());
-        // Continue — network may still work, and audio can be retried
     } else {
-        // Cache device list
+        std::lock_guard<std::mutex> lock(deviceMutex_);
         cachedInputDevices_ = audioEngine_->getInputDevices();
         cachedOutputDevices_ = audioEngine_->getOutputDevices();
         lastDeviceRefresh_ = std::chrono::steady_clock::now();
     }
 
-    // ── Network Manager ──────────────────────────────────────────────────
     networkManager_ = std::make_unique<NetworkManager>();
 
     // Wire audio output → network send
@@ -246,7 +281,6 @@ void LeoProximityChat::initSubsystems() {
         }
     });
 
-    // Peer notifications
     networkManager_->setPeerJoinedCallback([this](const std::string& steamId, const std::string& name) {
         log("Peer joined: " + name + " (" + steamId + ")");
     });
@@ -255,7 +289,6 @@ void LeoProximityChat::initSubsystems() {
         log("Peer left: " + name + " (" + steamId + ")");
     });
 
-    // Connection state changes
     networkManager_->setStateChangedCallback([this](NetworkManager::ConnectionState state, const std::string& info) {
         std::string stateStr;
         switch (state) {
@@ -265,20 +298,20 @@ void LeoProximityChat::initSubsystems() {
             case NetworkManager::ConnectionState::Reconnecting:  stateStr = "Reconnecting"; break;
             case NetworkManager::ConnectionState::Error:         stateStr = "Error"; break;
         }
-        log("Network: " + stateStr + " — " + info);
+        log("Network: " + stateStr + " - " + info);
 
-        // When connected and in a match, join the room
+        // When connected and in a match, join the room (must dispatch to game thread)
         if (state == NetworkManager::ConnectionState::Connected && inMatch_) {
-            std::string matchId = getMatchId();
-            if (!matchId.empty()) {
-                networkManager_->joinRoom(matchId, getLocalPlayerName(), getLocalSteamId());
-            }
+            gameWrapper->Execute([this](GameWrapper*) {
+                std::string matchId = getMatchId_GameThread();
+                if (!matchId.empty()) {
+                    networkManager_->joinRoom(matchId, getLocalPlayerName_GameThread(), getLocalSteamId_GameThread());
+                }
+            });
         }
     });
 
-    // Apply saved settings
     applyCVarSettings();
-
     subsystemsInitialized_ = true;
 }
 
@@ -297,19 +330,36 @@ void LeoProximityChat::shutdownSubsystems() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Game Event Handlers
+// Game Event Handlers (GAME THREAD)
 // ═════════════════════════════════════════════════════════════════════════════
 
 void LeoProximityChat::onTick(std::string /*eventName*/) {
     if (!enabled_ || !inMatch_) return;
 
-    // Update listener position for 3D audio
-    Protocol::Vec3 pos = getLocalCarPosition();
-    int yaw = getLocalCarYaw();
+    // Use CAMERA position/rotation for 3D audio listener (not the car)
+    Protocol::Vec3 camPos = getCameraPosition_GameThread();
+    int camYaw = getCameraYaw_GameThread();
+
+    // Use car position for the outgoing audio packet (other players hear you from your car)
+    Protocol::Vec3 carPos = getLocalCarPosition_GameThread();
 
     if (audioEngine_) {
-        audioEngine_->setListenerState(pos, yaw);
-        audioEngine_->setLocalPosition(pos);
+        audioEngine_->setListenerState(camPos, camYaw);
+        audioEngine_->setLocalPosition(carPos);
+    }
+
+    // Refresh cached state for UI display (every tick is fine, it's cheap)
+    refreshCachedGameState();
+
+    // Auto-join room if connected but not yet in a room
+    // (handles race conditions where connection happens after match join)
+    if (networkManager_ && networkManager_->isConnected() &&
+        networkManager_->getCurrentMatchId().empty()) {
+        std::string matchId = getMatchId_GameThread();
+        if (!matchId.empty()) {
+            networkManager_->joinRoom(matchId, getLocalPlayerName_GameThread(), getLocalSteamId_GameThread());
+            log("Auto-joined room: " + matchId);
+        }
     }
 }
 
@@ -318,7 +368,10 @@ void LeoProximityChat::onMatchJoined(std::string /*eventName*/) {
     if (inMatch_) return; // Avoid duplicate joins
 
     inMatch_ = true;
-    log("Match detected — starting proximity chat");
+    log("Match detected - starting proximity chat");
+
+    // Refresh cached state immediately
+    refreshCachedGameState();
 
     // Start audio streams
     if (audioEngine_ && audioEngine_->isInitialized()) {
@@ -329,7 +382,6 @@ void LeoProximityChat::onMatchJoined(std::string /*eventName*/) {
         }
     }
 
-    // Connect to server and join room
     connectToServer();
 }
 
@@ -337,16 +389,20 @@ void LeoProximityChat::onMatchLeft(std::string /*eventName*/) {
     if (!inMatch_) return;
 
     inMatch_ = false;
-    log("Match ended — stopping proximity chat");
+    log("Match ended - stopping proximity chat");
 
-    // Stop audio
     if (audioEngine_) {
         audioEngine_->stopStreams();
     }
 
-    // Leave room (but keep connection for quick rejoin)
     if (networkManager_ && networkManager_->isConnected()) {
         networkManager_->leaveRoom();
+    }
+
+    // Clear cached match state
+    {
+        std::lock_guard<std::mutex> lock(cachedStateMutex_);
+        cachedMatchId_.clear();
     }
 }
 
@@ -357,10 +413,9 @@ void LeoProximityChat::onMatchLeft(std::string /*eventName*/) {
 void LeoProximityChat::connectToServer() {
     if (!networkManager_) return;
 
-    std::string serverUrl = cvarManager->getCvar("leo_proxchat_server_url").getStringValue();
-    if (serverUrl.empty()) {
-        serverUrl = Protocol::DEFAULT_SERVER_URL;
-    }
+    auto urlCvar = cvarManager->getCvar("leo_proxchat_server_url");
+    std::string serverUrl = urlCvar ? urlCvar.getStringValue() : Protocol::DEFAULT_SERVER_URL;
+    if (serverUrl.empty()) serverUrl = Protocol::DEFAULT_SERVER_URL;
 
     if (!networkManager_->isConnected()) {
         networkManager_->connect(serverUrl);
@@ -368,9 +423,9 @@ void LeoProximityChat::connectToServer() {
 
     // Join room if already connected
     if (networkManager_->isConnected()) {
-        std::string matchId = getMatchId();
+        std::string matchId = getMatchId_GameThread();
         if (!matchId.empty()) {
-            networkManager_->joinRoom(matchId, getLocalPlayerName(), getLocalSteamId());
+            networkManager_->joinRoom(matchId, getLocalPlayerName_GameThread(), getLocalSteamId_GameThread());
         }
     }
 }
@@ -382,105 +437,166 @@ void LeoProximityChat::disconnectFromServer() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Game State Helpers
+// Game State Helpers (GAME THREAD ONLY — never call from UI/render)
 // ═════════════════════════════════════════════════════════════════════════════
 
-std::string LeoProximityChat::getMatchId() const {
-    if (!gameWrapper) return "";
-
-    // Try to get the server wrapper for online/offline match info
-    ServerWrapper server = gameWrapper->GetCurrentGameState();
-    if (!server) return "";
-
-    // Use match GUID if available
-    try {
-        // Construct a pseudo-match ID from game state
-        // In online play, we can combine server info
-        auto playlist = server.GetPlaylistId();
-        auto matchGUID = server.GetMatchGUID();
-
-        if (!matchGUID.empty()) {
-            return matchGUID;
-        }
-
-        // Fallback: create ID from player UIDs in the match (sorted)
-        ArrayWrapper<PriWrapper> pris = server.GetPRIs();
-        std::vector<std::string> ids;
-        for (int i = 0; i < pris.Count(); i++) {
-            PriWrapper pri = pris.Get(i);
-            if (!pri) continue;
-            auto uid = pri.GetUniqueIdWrapper();
-            ids.push_back(std::to_string(uid.GetUID()));
-        }
-        std::sort(ids.begin(), ids.end());
-
-        std::string combined = "rl_";
-        for (const auto& id : ids) combined += id + "_";
-        combined += std::to_string(playlist);
-        return combined;
-    }
-    catch (...) {
-        return "unknown_match";
-    }
+void LeoProximityChat::refreshCachedGameState() {
+    // Called from game thread (onTick / onMatchJoined)
+    std::lock_guard<std::mutex> lock(cachedStateMutex_);
+    cachedMatchId_    = getMatchId_GameThread();
+    cachedPlayerName_ = getLocalPlayerName_GameThread();
+    cachedSteamId_    = getLocalSteamId_GameThread();
+    cachedCarPos_     = getLocalCarPosition_GameThread();
+    cachedCarYaw_     = getLocalCarYaw_GameThread();
 }
 
-std::string LeoProximityChat::getLocalSteamId() const {
-    if (!gameWrapper) return "0";
+std::string LeoProximityChat::getMatchId_GameThread() const {
+    if (!gameWrapper) return "leo_global";
 
+    // Try online game first
+    ServerWrapper server = gameWrapper->GetOnlineGame();
+    if (!server) {
+        // Try generic current game state (freeplay, private, etc.)
+        server = gameWrapper->GetCurrentGameState();
+    }
+    if (!server) return "leo_global";
+
+    // Use match GUID if available (most reliable for online)
+    std::string matchGUID;
+    try { matchGUID = server.GetMatchGUID(); } catch (...) {}
+
+    if (!matchGUID.empty() && matchGUID != "No Match GUID" && matchGUID != "0") {
+        return matchGUID;
+    }
+
+    // Build a deterministic room from sorted player UIDs so all players in the
+    // same match end up in the same room regardless of who joins first
+    try {
+        auto players = server.GetPRIs();
+        if (players.Count() > 1) {
+            std::vector<std::string> uids;
+            for (int i = 0; i < players.Count(); i++) {
+                auto pri = players.Get(i);
+                if (pri) {
+                    try {
+                        auto uid = pri.GetUniqueIdWrapper();
+                        uint64_t id = uid.GetUID();
+                        if (id != 0) uids.push_back(std::to_string(id));
+                    } catch (...) {}
+                }
+            }
+            if (uids.size() > 1) {
+                std::sort(uids.begin(), uids.end());
+                std::string combined;
+                for (auto& u : uids) combined += u + "_";
+                return "rl_private_" + combined;
+            }
+        }
+    } catch (...) {}
+
+    // Final fallback: a single global room — everyone on this server
+    // can hear each other. This is the safest option for private servers.
+    return "leo_global";
+}
+
+std::string LeoProximityChat::getLocalSteamId_GameThread() const {
+    if (!gameWrapper) return generateUniqueId();
     try {
         auto uid = gameWrapper->GetUniqueID();
-        return std::to_string(uid.GetUID());
-    }
-    catch (...) {
-        return "0";
-    }
+        uint64_t id = uid.GetUID();
+        if (id != 0) return std::to_string(id);
+
+        // GetUID() returned 0 — try getting it from the player controller PRI
+        auto pc = gameWrapper->GetPlayerController();
+        if (pc) {
+            auto pri = pc.GetPRI();
+            if (pri) {
+                auto priUid = pri.GetUniqueIdWrapper();
+                uint64_t priId = priUid.GetUID();
+                if (priId != 0) return std::to_string(priId);
+            }
+        }
+    } catch (...) {}
+
+    // Last resort: generate a persistent random ID for this session
+    return generateUniqueId();
 }
 
-std::string LeoProximityChat::getLocalPlayerName() const {
-    if (!gameWrapper) return "Unknown";
+std::string LeoProximityChat::generateUniqueId() {
+    // Generate once per process lifetime — persistent across reconnects
+    static std::string cachedId;
+    if (cachedId.empty()) {
+        // Use a combination of time + random for uniqueness
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+        cachedId = "leo_" + std::to_string(ms % 999999999) + "_" + std::to_string(rand() % 99999);
+    }
+    return cachedId;
+}
 
+std::string LeoProximityChat::getLocalPlayerName_GameThread() const {
+    if (!gameWrapper) return "Unknown";
     try {
         auto pc = gameWrapper->GetPlayerController();
         if (!pc) return "Unknown";
         auto pri = pc.GetPRI();
         if (!pri) return "Unknown";
         return pri.GetPlayerName().ToString();
-    }
-    catch (...) {
-        return "Unknown";
-    }
+    } catch (...) { return "Unknown"; }
 }
 
-Protocol::Vec3 LeoProximityChat::getLocalCarPosition() const {
+Protocol::Vec3 LeoProximityChat::getLocalCarPosition_GameThread() const {
     if (!gameWrapper) return {};
-
     try {
         auto car = gameWrapper->GetLocalCar();
         if (!car) return {};
         Vector loc = car.GetLocation();
         return { loc.X, loc.Y, loc.Z };
-    }
-    catch (...) {
-        return {};
-    }
+    } catch (...) { return {}; }
 }
 
-int LeoProximityChat::getLocalCarYaw() const {
+int LeoProximityChat::getLocalCarYaw_GameThread() const {
     if (!gameWrapper) return 0;
-
     try {
         auto car = gameWrapper->GetLocalCar();
         if (!car) return 0;
         Rotator rot = car.GetRotation();
         return rot.Yaw;
+    } catch (...) { return 0; }
+}
+
+Protocol::Vec3 LeoProximityChat::getCameraPosition_GameThread() const {
+    if (!gameWrapper) return getLocalCarPosition_GameThread();
+    try {
+        CameraWrapper cam = gameWrapper->GetCamera();
+        if (cam.IsNull()) {
+            return getLocalCarPosition_GameThread();
+        }
+        // GetPOV() returns the exact rendered camera viewpoint,
+        // works correctly for ballcam, freecam, replays, etc.
+        POV pov = cam.GetPOV();
+        return { pov.location.X, pov.location.Y, pov.location.Z };
+    } catch (...) {
+        return getLocalCarPosition_GameThread();
     }
-    catch (...) {
-        return 0;
+}
+
+int LeoProximityChat::getCameraYaw_GameThread() const {
+    if (!gameWrapper) return getLocalCarYaw_GameThread();
+    try {
+        CameraWrapper cam = gameWrapper->GetCamera();
+        if (cam.IsNull()) {
+            return getLocalCarYaw_GameThread();
+        }
+        POV pov = cam.GetPOV();
+        return pov.rotation.Yaw;
+    } catch (...) {
+        return getLocalCarYaw_GameThread();
     }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Settings UI (ImGui)
+// Settings UI (ImGui) — runs on RENDER thread, NO gameWrapper access
 // ═════════════════════════════════════════════════════════════════════════════
 
 void LeoProximityChat::SetImGuiContext(uintptr_t ctx) {
@@ -488,12 +604,13 @@ void LeoProximityChat::SetImGuiContext(uintptr_t ctx) {
 }
 
 void LeoProximityChat::RenderSettings() {
-    // Header
     ImGui::TextColored(ImVec4(0.2f, 0.8f, 1.0f, 1.0f), "Leo's Rocket Proximity Chat v%s", PLUGIN_VERSION);
     ImGui::Separator();
 
-    // Enable toggle
-    CVarWrapper enabledCvar = cvarManager->getCvar("leo_proxchat_enabled");
+    // Enable toggle — use CVar directly (thread-safe in BakkesMod)
+    auto enabledCvar = cvarManager->getCvar("leo_proxchat_enabled");
+    if (!enabledCvar) return;
+
     bool isEnabled = enabledCvar.getBoolValue();
     if (ImGui::Checkbox("Enable Proximity Chat", &isEnabled)) {
         enabledCvar.setValue(isEnabled);
@@ -506,7 +623,6 @@ void LeoProximityChat::RenderSettings() {
 
     ImGui::Spacing();
 
-    // Tabs
     if (ImGui::BeginTabBar("ProxChatTabs")) {
         if (ImGui::BeginTabItem("Audio")) {
             renderAudioSettings();
@@ -536,32 +652,51 @@ void LeoProximityChat::renderAudioSettings() {
     ImGui::Text("Audio Devices");
     ImGui::Separator();
 
-    // Refresh devices periodically or on demand
+    // Refresh devices periodically (guarded by mutex)
     auto now = std::chrono::steady_clock::now();
-    bool needRefresh = std::chrono::duration_cast<std::chrono::seconds>(now - lastDeviceRefresh_).count() > 10;
-
-    if (needRefresh && audioEngine_ && audioEngine_->isInitialized()) {
-        cachedInputDevices_ = audioEngine_->getInputDevices();
-        cachedOutputDevices_ = audioEngine_->getOutputDevices();
-        lastDeviceRefresh_ = now;
+    {
+        std::lock_guard<std::mutex> lock(deviceMutex_);
+        bool needRefresh = std::chrono::duration_cast<std::chrono::seconds>(now - lastDeviceRefresh_).count() > 10;
+        if (needRefresh && audioEngine_ && audioEngine_->isInitialized()) {
+            cachedInputDevices_ = audioEngine_->getInputDevices();
+            cachedOutputDevices_ = audioEngine_->getOutputDevices();
+            lastDeviceRefresh_ = now;
+        }
     }
 
     // Input device combo
-    int inputId = cvarManager->getCvar("leo_proxchat_input_device").getIntValue();
-    ImGui::Text("Microphone:");
-    renderDeviceCombo("##InputDevice", inputId, cachedInputDevices_);
-    if (inputId != cvarManager->getCvar("leo_proxchat_input_device").getIntValue()) {
-        cvarManager->getCvar("leo_proxchat_input_device").setValue(inputId);
-        if (audioEngine_) audioEngine_->setInputDevice(inputId);
+    auto inputCvar = cvarManager->getCvar("leo_proxchat_input_device");
+    if (inputCvar) {
+        int inputId = inputCvar.getIntValue();
+        ImGui::Text("Microphone:");
+        {
+            std::lock_guard<std::mutex> lock(deviceMutex_);
+            renderDeviceCombo("##InputDevice", inputId, cachedInputDevices_);
+        }
+        if (inputId != inputCvar.getIntValue()) {
+            inputCvar.setValue(inputId);
+            // Schedule device change on game thread to avoid racing
+            gameWrapper->Execute([this, inputId](GameWrapper*) {
+                if (audioEngine_) audioEngine_->setInputDevice(inputId);
+            });
+        }
     }
 
     // Output device combo
-    int outputId = cvarManager->getCvar("leo_proxchat_output_device").getIntValue();
-    ImGui::Text("Speakers/Headphones:");
-    renderDeviceCombo("##OutputDevice", outputId, cachedOutputDevices_);
-    if (outputId != cvarManager->getCvar("leo_proxchat_output_device").getIntValue()) {
-        cvarManager->getCvar("leo_proxchat_output_device").setValue(outputId);
-        if (audioEngine_) audioEngine_->setOutputDevice(outputId);
+    auto outputCvar = cvarManager->getCvar("leo_proxchat_output_device");
+    if (outputCvar) {
+        int outputId = outputCvar.getIntValue();
+        ImGui::Text("Speakers/Headphones:");
+        {
+            std::lock_guard<std::mutex> lock(deviceMutex_);
+            renderDeviceCombo("##OutputDevice", outputId, cachedOutputDevices_);
+        }
+        if (outputId != outputCvar.getIntValue()) {
+            outputCvar.setValue(outputId);
+            gameWrapper->Execute([this, outputId](GameWrapper*) {
+                if (audioEngine_) audioEngine_->setOutputDevice(outputId);
+            });
+        }
     }
 
     if (ImGui::Button("Refresh Devices")) {
@@ -572,33 +707,37 @@ void LeoProximityChat::renderAudioSettings() {
     ImGui::Separator();
     ImGui::Text("Volume");
 
-    // Master volume slider
-    CVarWrapper masterVol = cvarManager->getCvar("leo_proxchat_master_volume");
-    float masterVal = masterVol.getFloatValue();
-    if (ImGui::SliderFloat("Master Volume", &masterVal, 0.0f, 200.0f, "%.0f%%")) {
-        masterVol.setValue(masterVal);
+    auto masterCvar = cvarManager->getCvar("leo_proxchat_master_volume");
+    if (masterCvar) {
+        float masterVal = masterCvar.getFloatValue();
+        if (ImGui::SliderFloat("Master Volume", &masterVal, 0.0f, 200.0f, "%.0f%%")) {
+            masterCvar.setValue(masterVal);
+        }
     }
 
-    // Mic volume slider
-    CVarWrapper micVol = cvarManager->getCvar("leo_proxchat_mic_volume");
-    float micVal = micVol.getFloatValue();
-    if (ImGui::SliderFloat("Mic Volume", &micVal, 0.0f, 300.0f, "%.0f%%")) {
-        micVol.setValue(micVal);
+    auto micCvar = cvarManager->getCvar("leo_proxchat_mic_volume");
+    if (micCvar) {
+        float micVal = micCvar.getFloatValue();
+        if (ImGui::SliderFloat("Mic Volume", &micVal, 0.0f, 300.0f, "%.0f%%")) {
+            micCvar.setValue(micVal);
+        }
     }
 
-    // Mic mute
-    CVarWrapper micMuted = cvarManager->getCvar("leo_proxchat_mic_muted");
-    bool muted = micMuted.getBoolValue();
-    if (ImGui::Checkbox("Mute Microphone", &muted)) {
-        micMuted.setValue(muted);
+    auto mutedCvar = cvarManager->getCvar("leo_proxchat_mic_muted");
+    if (mutedCvar) {
+        bool muted = mutedCvar.getBoolValue();
+        if (ImGui::Checkbox("Mute Microphone", &muted)) {
+            mutedCvar.setValue(muted);
+        }
     }
 
-    // Show input level meter
+    // Mic level meter (atomic reads, safe from any thread)
     if (audioEngine_) {
         float level = audioEngine_->getCurrentInputLevel();
         ImGui::Text("Mic Level:");
         ImGui::SameLine();
-        ImGui::ProgressBar(std::min(level * 10.0f, 1.0f), ImVec2(-1, 0), audioEngine_->isSpeaking() ? "SPEAKING" : "");
+        ImGui::ProgressBar(std::min(level * 10.0f, 1.0f), ImVec2(-1, 0),
+                           audioEngine_->isSpeaking() ? "SPEAKING" : "");
     }
 }
 
@@ -606,49 +745,51 @@ void LeoProximityChat::renderVoiceSettings() {
     ImGui::Text("Voice Activation");
     ImGui::Separator();
 
-    // PTT toggle
-    CVarWrapper pttCvar = cvarManager->getCvar("leo_proxchat_push_to_talk");
+    auto pttCvar = cvarManager->getCvar("leo_proxchat_push_to_talk");
+    if (!pttCvar) return;
+
     bool ptt = pttCvar.getBoolValue();
     if (ImGui::Checkbox("Push to Talk", &ptt)) {
         pttCvar.setValue(ptt);
     }
 
     if (ptt) {
-        // PTT key binding
-        CVarWrapper pttKeyCvar = cvarManager->getCvar("leo_proxchat_ptt_key");
-        std::string key = pttKeyCvar.getStringValue();
-
-        char keyBuf[32];
-        strncpy_s(keyBuf, key.c_str(), sizeof(keyBuf) - 1);
-        ImGui::Text("PTT Key:");
-        ImGui::SameLine();
-        if (ImGui::InputText("##PTTKey", keyBuf, sizeof(keyBuf))) {
-            pttKeyCvar.setValue(std::string(keyBuf));
+        auto pttKeyCvar = cvarManager->getCvar("leo_proxchat_ptt_key");
+        if (pttKeyCvar) {
+            std::string key = pttKeyCvar.getStringValue();
+            char keyBuf[32] = {};
+            strncpy_s(keyBuf, key.c_str(), sizeof(keyBuf) - 1);
+            ImGui::Text("PTT Key:");
+            ImGui::SameLine();
+            if (ImGui::InputText("##PTTKey", keyBuf, sizeof(keyBuf))) {
+                pttKeyCvar.setValue(std::string(keyBuf));
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Bind in console: bind %s \"leo_proxchat_ptt_pressed\"", keyBuf);
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "Bind in console: bind %s \"leo_proxchat_ptt_pressed\"; unbind_release %s \"leo_proxchat_ptt_released\"",
-            keyBuf, keyBuf);
     } else {
         ImGui::Text("Open Mic Settings");
         ImGui::Spacing();
 
-        // Voice threshold
-        CVarWrapper threshCvar = cvarManager->getCvar("leo_proxchat_voice_threshold");
-        float thresh = threshCvar.getFloatValue();
-        if (ImGui::SliderFloat("Voice Threshold", &thresh, 0.0f, 100.0f, "%.1f")) {
-            threshCvar.setValue(thresh);
+        auto threshCvar = cvarManager->getCvar("leo_proxchat_voice_threshold");
+        if (threshCvar) {
+            float thresh = threshCvar.getFloatValue();
+            if (ImGui::SliderFloat("Voice Threshold", &thresh, 0.0f, 100.0f, "%.1f")) {
+                threshCvar.setValue(thresh);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Lower = more sensitive. Increase if transmitting background noise.");
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "Lower = more sensitive. Increase if transmitting background noise.");
 
-        // Hold time
-        CVarWrapper holdCvar = cvarManager->getCvar("leo_proxchat_hold_time");
-        float hold = holdCvar.getFloatValue();
-        if (ImGui::SliderFloat("Hold Time (ms)", &hold, 0.0f, 2000.0f, "%.0f ms")) {
-            holdCvar.setValue(hold);
+        auto holdCvar = cvarManager->getCvar("leo_proxchat_hold_time");
+        if (holdCvar) {
+            float hold = holdCvar.getFloatValue();
+            if (ImGui::SliderFloat("Hold Time (ms)", &hold, 0.0f, 2000.0f, "%.0f ms")) {
+                holdCvar.setValue(hold);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "How long to keep transmitting after voice stops.");
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "How long to keep transmitting after voice stops.");
     }
 }
 
@@ -656,40 +797,44 @@ void LeoProximityChat::renderProximitySettings() {
     ImGui::Text("3D Proximity Audio");
     ImGui::Separator();
 
-    // 3D audio toggle
-    CVarWrapper spatialCvar = cvarManager->getCvar("leo_proxchat_3d_audio");
+    auto spatialCvar = cvarManager->getCvar("leo_proxchat_3d_audio");
+    if (!spatialCvar) return;
+
     bool spatial = spatialCvar.getBoolValue();
     if (ImGui::Checkbox("Enable 3D Spatial Audio", &spatial)) {
         spatialCvar.setValue(spatial);
     }
 
     if (spatial) {
-        // Max distance
-        CVarWrapper maxDistCvar = cvarManager->getCvar("leo_proxchat_max_distance");
-        float maxDist = maxDistCvar.getFloatValue();
-        if (ImGui::SliderFloat("Max Hearing Distance", &maxDist, 500.0f, 15000.0f, "%.0f uu")) {
-            maxDistCvar.setValue(maxDist);
+        auto maxDistCvar = cvarManager->getCvar("leo_proxchat_max_distance");
+        if (maxDistCvar) {
+            float maxDist = maxDistCvar.getFloatValue();
+            if (ImGui::SliderFloat("Max Hearing Distance", &maxDist, 500.0f, 15000.0f, "%.0f uu")) {
+                maxDistCvar.setValue(maxDist);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Beyond this distance, you won't hear the player. (Field ~10240 uu long)");
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "Beyond this distance, you won't hear the player. (Field ~10240 uu long)");
 
-        // Full volume distance
-        CVarWrapper fullDistCvar = cvarManager->getCvar("leo_proxchat_full_vol_distance");
-        float fullDist = fullDistCvar.getFloatValue();
-        if (ImGui::SliderFloat("Full Volume Distance", &fullDist, 0.0f, 5000.0f, "%.0f uu")) {
-            fullDistCvar.setValue(fullDist);
+        auto fullDistCvar = cvarManager->getCvar("leo_proxchat_full_vol_distance");
+        if (fullDistCvar) {
+            float fullDist = fullDistCvar.getFloatValue();
+            if (ImGui::SliderFloat("Full Volume Distance", &fullDist, 0.0f, 5000.0f, "%.0f uu")) {
+                fullDistCvar.setValue(fullDist);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Within this distance, voice is at full volume.");
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "Within this distance, voice is at full volume.");
 
-        // Rolloff factor
-        CVarWrapper rolloffCvar = cvarManager->getCvar("leo_proxchat_rolloff");
-        float rolloff = rolloffCvar.getFloatValue();
-        if (ImGui::SliderFloat("Rolloff Curve", &rolloff, 1.0f, 20.0f, "%.1f")) {
-            rolloffCvar.setValue(rolloff);
+        auto rolloffCvar = cvarManager->getCvar("leo_proxchat_rolloff");
+        if (rolloffCvar) {
+            float rolloff = rolloffCvar.getFloatValue();
+            if (ImGui::SliderFloat("Rolloff Curve", &rolloff, 1.0f, 20.0f, "%.1f")) {
+                rolloffCvar.setValue(rolloff);
+            }
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
+                "Higher = sharper volume dropoff with distance.");
         }
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-            "Higher = sharper volume dropoff with distance.");
     }
 }
 
@@ -697,26 +842,33 @@ void LeoProximityChat::renderNetworkSettings() {
     ImGui::Text("Server Connection");
     ImGui::Separator();
 
-    // Server URL
-    CVarWrapper urlCvar = cvarManager->getCvar("leo_proxchat_server_url");
-    std::string url = urlCvar.getStringValue();
-    char urlBuf[256];
-    strncpy_s(urlBuf, url.c_str(), sizeof(urlBuf) - 1);
-    ImGui::Text("Server URL:");
-    if (ImGui::InputText("##ServerURL", urlBuf, sizeof(urlBuf))) {
-        urlCvar.setValue(std::string(urlBuf));
+    auto urlCvar = cvarManager->getCvar("leo_proxchat_server_url");
+    if (urlCvar) {
+        std::string url = urlCvar.getStringValue();
+        char urlBuf[256] = {};
+        strncpy_s(urlBuf, url.c_str(), sizeof(urlBuf) - 1);
+        ImGui::Text("Server URL:");
+        if (ImGui::InputText("##ServerURL", urlBuf, sizeof(urlBuf))) {
+            urlCvar.setValue(std::string(urlBuf));
+        }
     }
 
     ImGui::Spacing();
     if (ImGui::Button("Reconnect")) {
-        cvarManager->executeCommand("leo_proxchat_reconnect");
+        // Dispatch to game thread
+        gameWrapper->Execute([this](GameWrapper*) {
+            disconnectFromServer();
+            connectToServer();
+        });
     }
     ImGui::SameLine();
     if (ImGui::Button("Disconnect")) {
-        disconnectFromServer();
+        gameWrapper->Execute([this](GameWrapper*) {
+            disconnectFromServer();
+        });
     }
 
-    // Connection info
+    // Connection info (read from network manager, atomic/mutex-protected)
     if (networkManager_) {
         ImGui::Spacing();
         ImGui::Separator();
@@ -738,11 +890,11 @@ void LeoProximityChat::renderStatusPanel() {
     ImGui::Text("Live Status");
     ImGui::Separator();
 
-    // Plugin state
+    // Plugin state (atomics, safe)
     ImGui::Text("Plugin: %s", enabled_.load() ? "Enabled" : "Disabled");
     ImGui::Text("In Match: %s", inMatch_.load() ? "Yes" : "No");
 
-    // Audio state
+    // Audio state (atomic reads, safe)
     if (audioEngine_) {
         ImGui::Spacing();
         ImGui::Text("Audio Engine: %s", audioEngine_->isInitialized() ? "OK" : "Not initialized");
@@ -755,14 +907,13 @@ void LeoProximityChat::renderStatusPanel() {
         }
     }
 
-    // Network state
+    // Network state (atomic/mutex reads, safe)
     if (networkManager_) {
         ImGui::Spacing();
         ImGui::Text("Network: %s", networkManager_->getStateString().c_str());
         ImGui::Text("Sent: %.1f KB", networkManager_->getBytesSent() / 1024.0f);
         ImGui::Text("Received: %.1f KB", networkManager_->getBytesReceived() / 1024.0f);
 
-        // Connected peers
         auto peers = networkManager_->getConnectedPeers();
         ImGui::Spacing();
         ImGui::Text("Connected Peers (%zu):", peers.size());
@@ -771,22 +922,23 @@ void LeoProximityChat::renderStatusPanel() {
         }
     }
 
-    // Local player info
+    // Local player info — READ FROM CACHE (safe from UI thread)
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Text("Local Player");
-    ImGui::Text("Name: %s", getLocalPlayerName().c_str());
-    ImGui::Text("Steam ID: %s", getLocalSteamId().c_str());
-    auto pos = getLocalCarPosition();
-    ImGui::Text("Position: (%.0f, %.0f, %.0f)", pos.x, pos.y, pos.z);
-    ImGui::Text("Match ID: %s", getMatchId().c_str());
+    {
+        std::lock_guard<std::mutex> lock(cachedStateMutex_);
+        ImGui::Text("Name: %s", cachedPlayerName_.c_str());
+        ImGui::Text("Steam ID: %s", cachedSteamId_.c_str());
+        ImGui::Text("Position: (%.0f, %.0f, %.0f)", cachedCarPos_.x, cachedCarPos_.y, cachedCarPos_.z);
+        ImGui::Text("Match ID: %s", cachedMatchId_.empty() ? "(none)" : cachedMatchId_.c_str());
+    }
 }
 
 void LeoProximityChat::renderDeviceCombo(
     const char* label, int& currentId,
     const std::vector<AudioEngine::DeviceInfo>& devices)
 {
-    // Find current device name for preview
     std::string preview = "Default";
     for (const auto& dev : devices) {
         if (dev.id == currentId) {
@@ -797,7 +949,6 @@ void LeoProximityChat::renderDeviceCombo(
     }
 
     if (ImGui::BeginCombo(label, preview.c_str())) {
-        // Default option
         bool isDefault = (currentId < 0);
         if (ImGui::Selectable("System Default", isDefault)) {
             currentId = -1;

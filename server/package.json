@@ -3,9 +3,15 @@
   "version": "1.0.0",
   "description": "Relay server for Leo's Rocket Proximity Chat BakkesMod plugin",
   "main": "server.js",
+  "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "build": "pkg . --targets node20-win-x64 --output LeoProxChatServer.exe"
+  },
+  "pkg": {
+    "assets": [".env"],
+    "outputPath": "dist"
   },
   "dependencies": {
     "ws": "^8.16.0",

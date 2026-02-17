@@ -4,6 +4,12 @@ project(LeoProximityChat VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Use static MSVC runtime (/MT) so the DLL has no CRT DLL dependencies
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# Force vcpkg to use static triplet
+set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+
 # ─── BakkesMod SDK ────────────────────────────────────────────────────────────
 # Set BAKKESMOD_SDK_PATH to the BakkesMod SDK root (contains "include/" and "lib/")
 # Typical: C:/Program Files (x86)/Steam/steamapps/common/rocketleague/Binaries/Win64/bakkesmod/bakkesmodsdk
@@ -30,11 +36,21 @@ if(NOT DEFINED BAKKESMOD_SDK_PATH OR NOT EXISTS "${BAKKESMOD_SDK_PATH}/include")
     )
 endif()
 
+# Normalize path to use forward slashes (avoids CMake escape issues)
+file(TO_CMAKE_PATH "${BAKKESMOD_SDK_PATH}" BAKKESMOD_SDK_PATH)
+
 # ─── Dependencies (via vcpkg) ────────────────────────────────────────────────
 find_package(portaudio CONFIG REQUIRED)
 find_package(Opus CONFIG REQUIRED)
 find_package(ixwebsocket CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+
+# ─── ImGui sources from BakkesMod SDK (must be compiled into the plugin) ─────
+set(IMGUI_SOURCES
+    "${BAKKESMOD_SDK_PATH}/include/imgui/imgui.cpp"
+    "${BAKKESMOD_SDK_PATH}/include/imgui/imgui_draw.cpp"
+    "${BAKKESMOD_SDK_PATH}/include/imgui/imgui_widgets.cpp"
+)
 
 # ─── Sources ─────────────────────────────────────────────────────────────────
 set(PLUGIN_SOURCES
@@ -44,6 +60,7 @@ set(PLUGIN_SOURCES
     src/SpatialAudio.cpp
     src/NetworkManager.cpp
     src/LeoProximityChat.cpp
+    ${IMGUI_SOURCES}
 )
 
 set(PLUGIN_HEADERS
@@ -65,6 +82,7 @@ target_precompile_headers(${PROJECT_NAME} PRIVATE src/pch.h)
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${BAKKESMOD_SDK_PATH}/include"
+    "${BAKKESMOD_SDK_PATH}/include/imgui"
     src
 )
 
@@ -74,11 +92,15 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     pluginsdk
-    portaudio
+    portaudio_static
     Opus::opus
     ixwebsocket::ixwebsocket
     nlohmann_json::nlohmann_json
 )
+
+# Ensure static runtime for all sources
+set_property(TARGET ${PROJECT_NAME} PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Windows-specific
 if(WIN32)
@@ -91,6 +113,7 @@ if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         ws2_32
         winmm
+        bcrypt
     )
 endif()
 

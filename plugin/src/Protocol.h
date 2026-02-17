@@ -36,10 +36,10 @@ namespace Protocol {
     constexpr int    OPUS_COMPLEXITY  = 5;                    // 0-10, balanced
 
     // Distance/spatial defaults (Unreal Units — RL field is ~10240 x 8192)
-    constexpr float  DEFAULT_MAX_DISTANCE      = 8000.0f;    // Beyond this, silence
-    constexpr float  DEFAULT_FULL_VOL_DISTANCE  = 1500.0f;   // Within this, full volume
-    constexpr float  DEFAULT_MASTER_VOLUME      = 1.0f;
-    constexpr float  DEFAULT_MIC_VOLUME         = 1.0f;
+    constexpr float  DEFAULT_MAX_DISTANCE      = 15000.0f;   // Almost whole map audible
+    constexpr float  DEFAULT_FULL_VOL_DISTANCE  = 2500.0f;    // Full volume within this
+    constexpr float  DEFAULT_MASTER_VOLUME      = 1.5f;
+    constexpr float  DEFAULT_MIC_VOLUME         = 1.2f;
     constexpr float  DEFAULT_VOICE_THRESHOLD    = 0.01f;     // RMS threshold for VAD
     constexpr float  DEFAULT_HOLD_TIME_MS       = 500.0f;    // VAD hold time
     constexpr float  DEFAULT_ROLLOFF_FACTOR     = 1.0f;      // Distance rolloff exponent

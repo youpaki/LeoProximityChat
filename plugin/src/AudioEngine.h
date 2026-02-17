@@ -132,20 +132,77 @@ private:
     bool detectVoiceActivity(const float* samples, int count);
 
     // ── Per-peer decoder state ───────────────────────────────────────────
+
+    /** Ring buffer for jitter-free audio playback. O(1) read/write. */
+    struct RingBuffer {
+        std::vector<float> data;
+        size_t readPos  = 0;
+        size_t writePos = 0;
+        size_t count    = 0;  // Samples currently buffered
+        size_t capacity = 0;
+
+        void init(size_t cap) {
+            capacity = cap;
+            data.resize(cap, 0.0f);
+            readPos = writePos = count = 0;
+        }
+
+        size_t available() const { return count; }
+        size_t freeSpace() const { return capacity - count; }
+
+        void write(const float* src, size_t n) {
+            n = std::min(n, freeSpace());
+            for (size_t i = 0; i < n; i++) {
+                data[writePos] = src[i];
+                writePos = (writePos + 1) % capacity;
+            }
+            count += n;
+        }
+
+        void read(float* dst, size_t n) {
+            n = std::min(n, count);
+            for (size_t i = 0; i < n; i++) {
+                dst[i] = data[readPos];
+                readPos = (readPos + 1) % capacity;
+            }
+            count -= n;
+        }
+
+        void readAdditive(float* dst, size_t n) {
+            n = std::min(n, count);
+            for (size_t i = 0; i < n; i++) {
+                dst[i] += data[readPos];
+                readPos = (readPos + 1) % capacity;
+            }
+            count -= n;
+        }
+
+        void clear() { readPos = writePos = count = 0; }
+    };
+
+    /** Pre-buffer threshold: accumulate this many stereo frames before
+     *  starting playback to absorb network jitter (60ms = 3 frames). */
+    static constexpr int PREBUFFER_FRAMES = 3;
+    static constexpr size_t PREBUFFER_STEREO_SAMPLES =
+        PREBUFFER_FRAMES * Protocol::FRAME_SIZE * Protocol::CHANNELS_STEREO;
+
     struct PeerAudioState {
         VoiceCodec codec;
         std::vector<float> decodeBuffer;       // Decoded PCM (mono)
         std::vector<float> spatialBuffer;      // Spatialized PCM (stereo)
-        std::vector<float> jitterBuffer;       // Buffered samples for smooth playback
+        RingBuffer jitterBuffer;               // Ring buffer for smooth playback
         SpatialAudio spatial;                  // Per-peer spatial processor
         Protocol::Vec3 lastPosition;
         std::chrono::steady_clock::time_point lastPacketTime;
         int plcFrames = 0;                     // Consecutive PLC frames
         bool active = false;
+        bool prebuffering = true;              // Waiting to accumulate pre-buffer
 
         PeerAudioState() {
             decodeBuffer.resize(Protocol::FRAME_SIZE * 2);
             spatialBuffer.resize(Protocol::FRAME_SIZE * 2 * 2); // Stereo
+            // Ring buffer holds up to 500ms of stereo audio (generous)
+            jitterBuffer.init(Protocol::SAMPLE_RATE * Protocol::CHANNELS_STEREO / 2);
         }
     };
 

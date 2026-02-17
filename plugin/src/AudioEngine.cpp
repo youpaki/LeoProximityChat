@@ -348,26 +348,25 @@ void AudioEngine::processPlaybackAudio(float* output, unsigned long frameCount) 
                 Protocol::Vec3 lPos = listenerPos_;
                 int lYaw = listenerYaw_.load();
 
+                // Use the CVar-configured spatial params from the main spatialAudio_ instance
                 peer.spatial.setDistanceParams(
-                    spatialAudio_.isEnabled() ? Protocol::DEFAULT_FULL_VOL_DISTANCE : 0.0f,
-                    spatialAudio_.isEnabled() ? Protocol::DEFAULT_MAX_DISTANCE : 100000.0f,
-                    Protocol::DEFAULT_ROLLOFF_FACTOR
+                    spatialAudio_.isEnabled() ? spatialAudio_.getInnerRadius() : 0.0f,
+                    spatialAudio_.isEnabled() ? spatialAudio_.getOuterRadius() : 100000.0f,
+                    spatialAudio_.getRolloff()
                 );
                 peer.spatial.setEnabled(spatialAudio_.isEnabled());
                 peer.spatial.setMasterVolume(outputVolume_.load());
+                peer.spatial.setReverbEnabled(spatialAudio_.isEnabled());
+                peer.spatial.setReverbMix(spatialAudio_.getReverbMix());
 
                 peer.spatial.process(
                     peer.decodeBuffer.data(), decoded, peer.spatialBuffer.data(),
                     lPos, lYaw, peer.lastPosition
                 );
 
-                // Insert into jitter buffer
+                // Insert into ring buffer jitter buffer
                 size_t stereoSamples = static_cast<size_t>(decoded) * 2;
-                peer.jitterBuffer.insert(
-                    peer.jitterBuffer.end(),
-                    peer.spatialBuffer.begin(),
-                    peer.spatialBuffer.begin() + stereoSamples
-                );
+                peer.jitterBuffer.write(peer.spatialBuffer.data(), stereoSamples);
             }
         }
     }
@@ -379,28 +378,56 @@ void AudioEngine::processPlaybackAudio(float* output, unsigned long frameCount) 
     for (auto& [steamId, peer] : peers_) {
         if (!peer->active) continue;
 
-        size_t available = peer->jitterBuffer.size();
-        size_t toRead = std::min(available, stereoFrameCount);
-
-        if (toRead > 0) {
-            // Mix into output
-            for (size_t i = 0; i < toRead; i++) {
-                output[i] += peer->jitterBuffer[i];
+        // Pre-buffering: wait until enough data has accumulated
+        // This absorbs network jitter and prevents initial stutters
+        if (peer->prebuffering) {
+            if (peer->jitterBuffer.available() >= PREBUFFER_STEREO_SAMPLES) {
+                peer->prebuffering = false;  // Start playback
+            } else {
+                continue;  // Keep accumulating
             }
-            // Remove consumed samples
-            peer->jitterBuffer.erase(
-                peer->jitterBuffer.begin(),
-                peer->jitterBuffer.begin() + toRead
-            );
-        } else {
-            // No data available — apply packet loss concealment
+        }
+
+        size_t available = peer->jitterBuffer.available();
+
+        if (available >= stereoFrameCount) {
+            // Enough data — mix directly (additive)
+            peer->jitterBuffer.readAdditive(output, stereoFrameCount);
+        } else if (available > 0) {
+            // Partial data — play what we have then apply PLC for remainder
+            peer->jitterBuffer.readAdditive(output, available);
+
+            // PLC for the gap
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - peer->lastPacketTime
             ).count();
 
             if (elapsed < 500 && peer->plcFrames < 10) {
-                // Try PLC
+                int plcSamples = peer->codec.decodePLC(
+                    peer->decodeBuffer.data(), Protocol::FRAME_SIZE
+                );
+                if (plcSamples > 0) {
+                    peer->plcFrames++;
+                    Protocol::Vec3 lPos = listenerPos_;
+                    int lYaw = listenerYaw_.load();
+                    peer->spatial.process(
+                        peer->decodeBuffer.data(), plcSamples, peer->spatialBuffer.data(),
+                        lPos, lYaw, peer->lastPosition
+                    );
+                    // Buffer the PLC output for next callback
+                    size_t plcStereo = static_cast<size_t>(plcSamples) * 2;
+                    peer->jitterBuffer.write(peer->spatialBuffer.data(), plcStereo);
+                }
+            }
+        } else {
+            // No data — apply packet loss concealment
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - peer->lastPacketTime
+            ).count();
+
+            if (elapsed < 500 && peer->plcFrames < 10) {
                 int plcSamples = peer->codec.decodePLC(
                     peer->decodeBuffer.data(), Protocol::FRAME_SIZE
                 );
@@ -421,15 +448,16 @@ void AudioEngine::processPlaybackAudio(float* output, unsigned long frameCount) 
                     }
                 }
             } else if (elapsed > 2000) {
-                // Peer hasn't sent audio in 2 seconds — mark inactive
                 peer->active = false;
+                peer->prebuffering = true;   // Reset pre-buffer for next activation
+                peer->jitterBuffer.clear();
             }
         }
     }
 
     // Soft clamp output to prevent clipping
     for (size_t i = 0; i < stereoFrameCount; i++) {
-        output[i] = std::tanh(output[i]); // Soft saturation
+        output[i] = std::tanh(output[i]);
     }
 }
 
