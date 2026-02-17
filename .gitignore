@@ -11,9 +11,10 @@ dist/
 # IDE
 .vs/
 .vscode/
-*.sln
-*.vcxproj*
 *.user
+
+# Ignore CMake-generated solution but keep our hand-written ones
+plugin/build/
 
 # Dependencies
 node_modules/
