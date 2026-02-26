@@ -272,8 +272,7 @@ int AudioEngine::playbackCallback(
 // ═════════════════════════════════════════════════════════════════════════════
 
 void AudioEngine::processCapturedAudio(const float* input, unsigned long frameCount) {
-    // When demolished, completely silence the microphone — others can't hear you
-    if (micMuted_ || isDemolished_) {
+    if (micMuted_) {
         isSpeaking_ = false;
         currentInputLevel_ = 0.0f;
         return;
@@ -326,11 +325,6 @@ void AudioEngine::processCapturedAudio(const float* input, unsigned long frameCo
 void AudioEngine::processPlaybackAudio(float* output, unsigned long frameCount) {
     // Clear output buffer (stereo)
     std::memset(output, 0, frameCount * Protocol::CHANNELS_STEREO * sizeof(float));
-
-    // When demolished, output pure silence — you can't hear anyone
-    if (isDemolished_) {
-        return;
-    }
 
     // Process all pending incoming packets
     while (auto pktOpt = incomingPackets_.tryPop()) {

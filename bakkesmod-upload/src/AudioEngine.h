@@ -88,9 +88,6 @@ public:
     void setMicMuted(bool muted) { micMuted_ = muted; }
     bool isMicMuted() const { return micMuted_; }
 
-    void setDemolished(bool demo) { isDemolished_ = demo; }
-    bool isDemolished() const { return isDemolished_; }
-
     // ── Callbacks ────────────────────────────────────────────────────────
     /** Set callback for when an encoded audio packet is ready to send. */
     void setPacketReadyCallback(PacketReadyCallback cb) { packetReadyCb_ = std::move(cb); }
@@ -233,7 +230,6 @@ private:
     std::atomic<float> micVolume_{Protocol::DEFAULT_MIC_VOLUME};
     std::atomic<float> outputVolume_{Protocol::DEFAULT_MASTER_VOLUME};
     std::atomic<bool>  micMuted_{false};
-    std::atomic<bool>  isDemolished_{false};
     std::atomic<bool>  isSpeaking_{false};
     std::atomic<float> currentInputLevel_{0.0f};
 

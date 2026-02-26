@@ -336,18 +336,6 @@ void LeoProximityChat::shutdownSubsystems() {
 void LeoProximityChat::onTick(std::string /*eventName*/) {
     if (!enabled_ || !inMatch_) return;
 
-    // ── Detect demolition: car is null while in a match ──────────────────
-    bool demolished = false;
-    try {
-        auto car = gameWrapper->GetLocalCar();
-        if (!car) {
-            demolished = true;
-        }
-    } catch (...) {
-        demolished = true;
-    }
-    isDemolished_ = demolished;
-
     // Use CAMERA position/rotation for 3D audio listener (not the car)
     Protocol::Vec3 camPos = getCameraPosition_GameThread();
     int camYaw = getCameraYaw_GameThread();
@@ -356,7 +344,6 @@ void LeoProximityChat::onTick(std::string /*eventName*/) {
     Protocol::Vec3 carPos = getLocalCarPosition_GameThread();
 
     if (audioEngine_) {
-        audioEngine_->setDemolished(demolished);
         audioEngine_->setListenerState(camPos, camYaw);
         audioEngine_->setLocalPosition(carPos);
     }

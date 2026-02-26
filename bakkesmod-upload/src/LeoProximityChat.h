@@ -74,7 +74,6 @@ private:
     // ── State ────────────────────────────────────────────────────────────
     std::atomic<bool> enabled_{true};
     std::atomic<bool> inMatch_{false};
-    std::atomic<bool> isDemolished_{false};
     bool subsystemsInitialized_ = false;
 
     // ── Cached game state (written game thread, read UI thread) ──────────

@@ -130,22 +130,6 @@ private:
         void reset() { prev = 0.0f; }
     };
 
-    /** Distance-dependent high-pass filter (removes bass at distance).
-     *  Simulates the real-world phenomenon where low frequencies
-     *  lose energy over long distances. One-pole HP design. */
-    struct DistanceHighPassFilter {
-        float prevIn  = 0.0f;
-        float prevOut = 0.0f;
-        float process(float in, float alpha) {
-            // One-pole high-pass: y[n] = alpha * (y[n-1] + x[n] - x[n-1])
-            float out = alpha * (prevOut + in - prevIn);
-            prevIn  = in;
-            prevOut = out;
-            return out;
-        }
-        void reset() { prevIn = prevOut = 0.0f; }
-    };
-
     // ── Reverb Engine (Schroeder-style) ──────────────────────────────────
 
     /** Comb filter for reverb tail */
@@ -256,15 +240,14 @@ private:
     HeadShadowFilter headFilterL_, headFilterR_;
     AirAbsorptionFilter airAbsL_, airAbsR_;
     AirAbsorptionFilter airAbsMono_;   // Pre-reverb absorption
-    DistanceHighPassFilter distHpL_, distHpR_;  // Distance bass rolloff
     ReverbEngine reverb_;
 
     // Doppler effect state
     DopplerLine dopplerL_, dopplerR_;
     float prevDistUU_ = -1.0f;         // Previous frame distance (for velocity)
     float dopplerPitchRatio_ = 1.0f;   // Current pitch multiplier
-    static constexpr float DOPPLER_EXAGGERATION = 4.0f;   // Strong audible Doppler
-    static constexpr float DOPPLER_SMOOTH = 0.002f;       // Responsive smoothing
+    static constexpr float DOPPLER_EXAGGERATION = 1.2f;  // Subtle exaggeration — realistic feel
+    static constexpr float DOPPLER_SMOOTH = 0.00005f;    // Extremely slow smoothing — silky gradual pitch glide
 
     // Smooth interpolation for gains and panning
     SmoothParam smoothGainL_, smoothGainR_;

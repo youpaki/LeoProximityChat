@@ -27,8 +27,6 @@ void SpatialAudio::reset() {
     airAbsL_.reset();
     airAbsR_.reset();
     airAbsMono_.reset();
-    distHpL_.reset();
-    distHpR_.reset();
     reverb_.clear();
     smoothGainL_.snap(0.5f);
     smoothGainR_.snap(0.5f);
@@ -360,7 +358,7 @@ float SpatialAudio::process(const float* monoIn, int frameSize, float* stereoOut
         exaggeratedV = std::clamp(exaggeratedV, -SPEED_OF_SOUND * 0.8f, SPEED_OF_SOUND * 0.8f);
         targetDopplerPitch = SPEED_OF_SOUND / (SPEED_OF_SOUND + exaggeratedV);
         // Clamp pitch ratio to sane range
-        targetDopplerPitch = std::clamp(targetDopplerPitch, 0.70f, 1.40f); // Wide, clearly audible range
+        targetDopplerPitch = std::clamp(targetDopplerPitch, 0.88f, 1.12f); // Very tight range — subtle and smooth
     }
     prevDistUU_ = distUU;
 
@@ -386,21 +384,6 @@ float SpatialAudio::process(const float* monoIn, int frameSize, float* stereoOut
     }
 
     // ─── 4. Per-sample Processing (with Doppler pitch shifting) ─────────
-
-    // Distance-based high-pass: further away = less bass
-    // Cutoff goes from ~20 Hz (close) to ~600 Hz (max distance)
-    // alpha for one-pole HP: alpha = 1 / (1 + 2*pi*fc/sr)
-    float hpCutoff;
-    if (distUU <= innerRadius_) {
-        hpCutoff = 20.0f;  // Full bass at close range
-    } else {
-        float t = smoothstep(innerRadius_, outerRadius_, distUU);
-        hpCutoff = 20.0f + t * 580.0f;  // Ramp up to 600 Hz at max distance
-    }
-    float hpAlpha = 1.0f / (1.0f + (2.0f * static_cast<float>(M_PI) * hpCutoff)
-                    / static_cast<float>(Protocol::SAMPLE_RATE));
-    // Clamp: alpha=1 means no filtering, lower means more bass cut
-    hpAlpha = std::clamp(hpAlpha, 0.90f, 1.0f);
 
     // Smoothing coefficient: smooth but responsive enough to feel the stereo
     // 0.0004 at 48kHz ≈ ~55ms time constant
@@ -459,10 +442,6 @@ float SpatialAudio::process(const float* monoIn, int frameSize, float* stereoOut
         // ── Apply ILD gains ──
         float dryL = sampleL * gL;
         float dryR = sampleR * gR;
-
-        // ── Distance high-pass: cut bass at long range ──
-        dryL = distHpL_.process(dryL, hpAlpha);
-        dryR = distHpR_.process(dryR, hpAlpha);
 
         // ── Reverb processing ──
         float wetL = 0.0f, wetR = 0.0f;

@@ -1,0 +1,24 @@
+Leo's Rocket Proximity Chat
+1|Enable Proximity Chat|leo_proxchat_enabled
+9|
+10|--- Audio Settings ---
+4|Master Volume (%)|leo_proxchat_master_volume|0|200
+4|Mic Volume (%)|leo_proxchat_mic_volume|0|300
+1|Mute Microphone|leo_proxchat_mic_muted
+9|
+10|--- Voice Mode ---
+1|Push to Talk|leo_proxchat_push_to_talk
+2|PTT Key|leo_proxchat_ptt_key
+4|Voice Threshold|leo_proxchat_voice_threshold|0|100
+4|Hold Time (ms)|leo_proxchat_hold_time|0|2000
+9|
+10|--- 3D Proximity ---
+1|Enable 3D Spatial Audio|leo_proxchat_3d_audio
+4|Max Hearing Distance|leo_proxchat_max_distance|500|15000
+4|Full Volume Distance|leo_proxchat_full_vol_distance|0|5000
+4|Rolloff Curve|leo_proxchat_rolloff|1|20
+9|
+10|--- Network ---
+2|Server URL|leo_proxchat_server_url
+6|Reconnect|leo_proxchat_reconnect
+6|Refresh Audio Devices|leo_proxchat_refresh_devices
